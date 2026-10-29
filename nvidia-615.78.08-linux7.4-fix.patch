@@ -1,0 +1,73 @@
+--- a/kernel-open/nvidia-uvm/uvm_hmm.c
++++ b/kernel-open/nvidia-uvm/uvm_hmm.c
+@@ -4032,14 +4032,20 @@
+     if (vma_has_cow_sharing(vma))
+         return true;
+ 
+-    // migrate_vma_setup() can't migrate VM_SPECIAL so we have to force GPU
+-    // remote mapping.
++    // migrate_vma_setup() can't migrate special mappings so we have to force
++    // GPU remote mapping.
+     // TODO: Bug 3660968: add support for file-backed migrations.
+     // TODO: Bug 3368756: add support for transparent huge page migrations.
+     return !vma_is_anonymous(vma) ||
++#ifdef VM_SPECIAL
+            (vma->vm_flags & VM_SPECIAL) ||
++#else
++           // VM_SPECIAL was removed in Linux 7.4; migrate_vma_setup() now
++           // rejects VMAs that are not mm-backed (see mm/migrate_device.c).
++           !vma_is_mm_backed(vma) ||
++#endif
+            vma_is_dax(vma) ||
+-           is_vm_hugetlb_page(vma);
++           (vma->vm_flags & VM_HUGETLB);
+ }
+ 
+ #endif // UVM_IS_CONFIG_HMM()
+--- a/kernel-open/nvidia-uvm/uvm_migrate_pageable.c
++++ b/kernel-open/nvidia-uvm/uvm_migrate_pageable.c
+@@ -829,8 +829,10 @@
+     // If reserving a p2p channel slot failed with NV_ERR_BUSY_RETRY, nvlink
+     // is currently suspended. Retry the copy using cLinks instead of gLinks.
+     if (status == NV_ERR_BUSY_RETRY && UVM_ID_IS_GPU(src_id) && UVM_ID_IS_GPU(dst_id) && !use_clinks_for_p2p) {
+-        UVM_ASSERT_MSG(!src_has_dma_mappings, "Copy %d -> %d should not have src dma mappings\n", src_id, dst_id);
+-        UVM_ASSERT_MSG(!dst_has_dma_mappings, "Copy %d -> %d should not have dst dma mappings\n", src_id, dst_id);
++        UVM_ASSERT_MSG(!src_has_dma_mappings, "Copy %u -> %u should not have src dma mappings\n",
++                       uvm_id_value(src_id), uvm_id_value(dst_id));
++        UVM_ASSERT_MSG(!dst_has_dma_mappings, "Copy %u -> %u should not have dst dma mappings\n",
++                       uvm_id_value(src_id), uvm_id_value(dst_id));
+         UVM_ASSERT(uvm_id_equal(copying_gpu->id, src_id));
+         UVM_ASSERT(channel_type == UVM_CHANNEL_TYPE_GPU_TO_GPU);
+ 
+--- a/kernel-open/nvidia-drm/nvidia-drm-drv.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-drv.c
+@@ -63,7 +63,9 @@
+ #include <drm/drm_aperture.h>
+ #endif
+ 
+-#if defined(NV_DRM_FBDEV_AVAILABLE)
++#if defined(NV_DRM_CLIENT_AVAILABLE)
++#include <drm/drm_client_event.h>
++#elif defined(NV_DRM_FBDEV_AVAILABLE)
+ #include <drm/drm_fb_helper.h>
+ #endif
+ 
+@@ -2381,12 +2383,16 @@
+ 
+         if (suspend) {
+             drm_kms_helper_poll_disable(dev);
+-#if defined(NV_DRM_FBDEV_AVAILABLE)
++#if defined(NV_DRM_CLIENT_AVAILABLE)
++            drm_client_dev_suspend(dev);
++#elif defined(NV_DRM_FBDEV_AVAILABLE)
+             drm_fb_helper_set_suspend_unlocked(dev->fb_helper, 1);
+ #endif
+             drm_mode_config_reset(dev);
+         } else {
+-#if defined(NV_DRM_FBDEV_AVAILABLE)
++#if defined(NV_DRM_CLIENT_AVAILABLE)
++            drm_client_dev_resume(dev);
++#elif defined(NV_DRM_FBDEV_AVAILABLE)
+             drm_fb_helper_set_suspend_unlocked(dev->fb_helper, 0);
+ #endif
+             drm_kms_helper_poll_enable(dev);
